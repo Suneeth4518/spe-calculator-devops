@@ -4,12 +4,13 @@
   vars:
     image: "{{ image }}"
     container_name: "{{ container_name | default('spe-calc') }}"
-    app_port: "{{ app_port | default(5000) }}"   # use app_port, not 'port'
+    app_port: "{{ app_port | default(5000) }}"
 
   tasks:
     - name: Ensure Python libs for Docker are present on control host
       ansible.builtin.pip:
         name:
+          - packaging
           - requests
           - docker
         executable: /opt/homebrew/bin/pip3
