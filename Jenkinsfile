@@ -2,33 +2,125 @@ pipeline {
   agent any
 
   environment {
-    IMAGE_NAME = "suneeth4518/spe-calculator"
-    DOCKERHUB  = credentials('dockerhub-creds')   // $DOCKERHUB_USR / $DOCKERHUB_PSW
-    PY3        = "/opt/homebrew/bin/python3"      // system python to create venvs
-    // Absolute paths for CLIs on your Mac:
-    ANS_GALAXY = "/opt/homebrew/bin/ansible-galaxy"
-    NGROK      = "/opt/homebrew/bin/ngrok"
-    GH_API     = "https://api.github.com"
-    GH_OWNER   = "Suneeth4518"
-    GH_REPO    = "spe-calculator-devops"
-    // Optional: if you prefer your static ngrok domain, set it here.
-    // Leave empty to auto-detect via ngrok API (localhost:4040)
-    STATIC_NGROK_URL = "https://gullibly-clinometric-demi.ngrok-free.dev"
+    IMAGE_NAME   = "suneeth4518/spe-calculator"
+    DOCKERHUB    = credentials('dockerhub-creds')
+    PY3          = "/opt/homebrew/bin/python3"
+    DOCKER       = "/usr/local/bin/docker"
+    NGROK        = "/opt/homebrew/bin/ngrok"
+    GITHUB_TOKEN = credentials('github-token')
+    GITHUB_OWNER = "Suneeth4518"
+    GITHUB_REPO  = "spe-calculator-devops"
   }
 
   triggers { githubPush() }
 
-  options {
-    // Keeps logs readable and stops at first failing command in sh blocks
-    ansiColor('xterm')
-    timestamps()
-  }
-
   stages {
 
     stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Expose Jenkins & Ensure GitHub Webhook') {
       steps {
-        checkout scm
+        withCredentials([string(credentialsId: 'ngrok-authtoken', variable: 'NGROK_AUTHTOKEN')]) {
+          sh '''
+            set -euo pipefail
+
+            # 0) Ensure ngrok is configured (optional – only if you provided ngrok-authtoken)
+            if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
+              ${NGROK} config add-authtoken "${NGROK_AUTHTOKEN}" >/dev/null 2>&1 || true
+            fi
+
+            # 1) Start ngrok to expose Jenkins (PORT 8080), not the app.
+            if ! pgrep -f "${NGROK} http 8080" >/dev/null 2>&1; then
+              nohup ${NGROK} http 8080 --log=stdout >/dev/null 2>&1 &
+            fi
+
+            # 2) Wait for tunnel to be ready and grab the https public URL
+            for i in $(seq 1 40); do
+              if curl -fsS http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
+                break
+              fi
+              sleep 0.5
+            done
+            APP_URL="$(${PY3} - <<'PY'
+import json,sys,urllib.request
+try:
+  data=json.load(urllib.request.urlopen('http://127.0.0.1:4040/api/tunnels'))
+  for t in data.get('tunnels',[]):
+    if t.get('proto')=='https':
+      print(t.get('public_url'))
+      sys.exit(0)
+except Exception as e:
+  pass
+sys.exit(1)
+PY
+)"
+            if [ -z "${APP_URL}" ]; then
+              echo "Failed to get ngrok public URL" >&2
+              exit 1
+            fi
+            echo "Jenkins is publicly reachable at: ${APP_URL}"
+
+            DESIRED_URL="${APP_URL%/}/github-webhook/"
+            echo "Desired GitHub webhook URL: ${DESIRED_URL}"
+
+            GH_API="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/hooks"
+            AUTHH="Authorization: token ${GITHUB_TOKEN}"
+            ACH="Accept: application/vnd.github.v3+json"
+            CT="Content-Type: application/json"
+
+            # 3) Fetch existing hooks
+            HOOKS_JSON="$(curl -fsSL -H "$AUTHH" -H "$ACH" "$GH_API" || echo "[]")"
+
+            # 4) Find an existing 'web' hook pointing to /github-webhook/
+            HOOK_ID="$(${PY3} - <<PY
+import json,sys
+data=json.loads("""${HOOKS_JSON}""")
+for h in data:
+  cfg=h.get("config") or {}
+  url=cfg.get("url") or ""
+  if url.endswith("/github-webhook/"):
+    print(h.get("id") or "")
+    break
+PY
+)"
+            if [ -n "${HOOK_ID}" ]; then
+              echo "Existing webhook found: ID=${HOOK_ID}. Ensuring URL/config up to date..."
+              curl -fsSL -X PATCH "$GH_API/${HOOK_ID}" \
+                -H "$AUTHH" -H "$ACH" -H "$CT" \
+                -d @- <<JSON >/dev/null
+{
+  "active": true,
+  "events": ["push"],
+  "config": {
+    "url": "${DESIRED_URL}",
+    "content_type": "json",
+    "insecure_ssl": "0"
+  }
+}
+JSON
+            else
+              echo "No existing webhook. Creating a new one..."
+              curl -fsSL -X POST "$GH_API" \
+                -H "$AUTHH" -H "$ACH" -H "$CT" \
+                -d @- <<JSON >/dev/null
+{
+  "name": "web",
+  "active": true,
+  "events": ["push"],
+  "config": {
+    "url": "${DESIRED_URL}",
+    "content_type": "json",
+    "insecure_ssl": "0"
+  }
+}
+JSON
+            fi
+
+            echo "GitHub webhook is set to: ${DESIRED_URL}"
+          '''
+        }
       }
     }
 
@@ -40,7 +132,6 @@ pipeline {
           . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
           mkdir -p reports
           pytest -q --junitxml=reports/pytest.xml
         '''
@@ -54,9 +145,8 @@ pipeline {
       steps {
         sh '''
           set -e
-          DOCKER_BIN=$(which docker)
-          echo "Using docker at: $DOCKER_BIN"
-          $DOCKER_BIN build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest .
+          echo "Using docker at: ${DOCKER}"
+          ${DOCKER} build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest .
         '''
       }
     }
@@ -65,10 +155,9 @@ pipeline {
       steps {
         sh '''
           set -e
-          DOCKER_BIN=$(which docker)
-          echo $DOCKERHUB_PSW | $DOCKER_BIN login -u $DOCKERHUB_USR --password-stdin
-          $DOCKER_BIN push ${IMAGE_NAME}:${BUILD_NUMBER}
-          $DOCKER_BIN push ${IMAGE_NAME}:latest
+          echo $DOCKERHUB_PSW | ${DOCKER} login -u $DOCKERHUB_USR --password-stdin
+          ${DOCKER} push ${IMAGE_NAME}:${BUILD_NUMBER}
+          ${DOCKER} push ${IMAGE_NAME}:latest
         '''
       }
     }
@@ -76,133 +165,26 @@ pipeline {
     stage('Deploy via Ansible') {
       steps {
         sh '''
-          set -euo pipefail
+          set -e
 
-          # Create an isolated control venv for Ansible + python libs (avoids PEP 668 issues)
-          if [ ! -d ".ansctl" ]; then
-            ${PY3} -m venv .ansctl
+          ANS_VENV=".ansible-venv"
+          if [ ! -d "${ANS_VENV}" ]; then
+            ${PY3} -m venv ${ANS_VENV}
           fi
-          . .ansctl/bin/activate
+          . ${ANS_VENV}/bin/activate
           python -m pip install --upgrade pip
-          pip install "ansible>=9" packaging requests docker PyYAML jinja2
+          pip install "ansible>=9" requests docker packaging
+          ansible-galaxy collection install community.docker --force
 
-          # Ensure the required collection is present
-          .ansctl/bin/ansible-galaxy collection list | grep -q community.docker \
-            || .ansctl/bin/ansible-galaxy collection install community.docker
-
-          # Run the playbook using the venv's python as interpreter
-          # NOTE: deploy/hosts.ini should NOT hardcode ansible_python_interpreter anymore.
-          .ansctl/bin/ansible-playbook \
+          ANSIBLE_PY="$(pwd)/${ANS_VENV}/bin/python"
+          "$(pwd)/${ANS_VENV}/bin/ansible-playbook" \
             -i deploy/hosts.ini \
             deploy/deploy.yml \
-            --extra-vars "ansible_python_interpreter=${WORKSPACE}/.ansctl/bin/python image=${IMAGE_NAME}:latest container_name=spe-calc app_port=5000"
+            --extra-vars "image=${IMAGE_NAME}:latest container_name=spe-calc app_port=5000 ansible_python_interpreter=${ANSIBLE_PY}"
         '''
-      }
-    }
-
-    stage('Upsert GitHub Webhook') {
-      environment {
-        // Your GitHub PAT stored in Jenkins credentials as a "Secret text" id=github-token
-        // Must have: admin:repo_hook (and repo if the repo is private)
-      }
-      steps {
-        withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
-          sh '''
-            set -euo pipefail
-
-            # 1) Ensure ngrok is running and get public URL
-            if ! pgrep -f "${NGROK} http 5000" >/dev/null 2>&1; then
-              nohup ${NGROK} http 5000 --log=stdout >/dev/null 2>&1 &
-            fi
-
-            # Wait up to ~10s for ngrok API to respond
-            for i in $(seq 1 20); do
-              if curl -sS http://127.0.0.1:4040/api/tunnels >/dev/null; then
-                break
-              fi
-              sleep 0.5
-            done
-
-            APP_URL=""
-            # Prefer STATIC_NGROK_URL if provided (free static subdomain)
-            if [ -n "${STATIC_NGROK_URL}" ]; then
-              APP_URL="${STATIC_NGROK_URL}"
-            else
-              APP_URL=$(${PY3} - <<'PY'
-import json, urllib.request
-try:
-    data = json.load(urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels"))
-    tunnels = [t for t in data.get("tunnels", []) if t.get("public_url","").startswith("https://")]
-    if tunnels:
-        print(tunnels[0]["public_url"])
-except Exception:
-    pass
-PY
-)
-            fi
-
-            if [ -z "${APP_URL}" ]; then
-              echo "ERROR: Could not determine public URL for the app."
-              exit 1
-            fi
-
-            echo "App is publicly reachable at: ${APP_URL}"
-            HOOK_TARGET="${APP_URL%/}/github-webhook/"
-
-            AUTH_H="Authorization: Bearer ${GH_TOKEN}"
-            API="${GH_API}/repos/${GH_OWNER}/${GH_REPO}/hooks"
-
-            # 2) List existing hooks (NO -f so we can inspect error body)
-            HTTP=$(curl -sS -w "%{http_code}" -H "$AUTH_H" -H "Accept: application/vnd.github+json" \
-                   -o hooks.json "$API")
-
-            if [ "$HTTP" -lt 200 ] || [ "$HTTP" -ge 300 ]; then
-              echo "GitHub API error while listing hooks (HTTP $HTTP):"
-              cat hooks.json || true
-              exit 1
-            fi
-
-            # 3) Find an existing Jenkins webhook (by URL suffix)
-            HOOK_ID=$(${PY3} - <<'PY'
-import json, sys
-try:
-    hooks = json.load(open("hooks.json","r"))
-except Exception:
-    hooks = []
-for h in hooks:
-    url = (h.get("config") or {}).get("url","")
-    if url.endswith("/github-webhook/"):
-        print(h.get("id") or "")
-        break
-PY
-)
-
-            # 4) Create or update the webhook
-            if [ -z "$HOOK_ID" ]; then
-              echo "Creating webhook → $HOOK_TARGET"
-              HTTP=$(curl -sS -w "%{http_code}" -H "$AUTH_H" -H "Accept: application/vnd.github+json" \
-                     -H "Content-Type: application/json" \
-                     -o resp.json -X POST "$API" \
-                     -d '{"name":"web","active":true,"events":["push"],"config":{"url":"'"$HOOK_TARGET"'","content_type":"json"}}')
-            else
-              echo "Updating webhook ${HOOK_ID} → $HOOK_TARGET"
-              HTTP=$(curl -sS -w "%{http_code}" -H "$AUTH_H" -H "Accept: application/vnd.github+json" \
-                     -H "Content-Type: application/json" \
-                     -o resp.json -X PATCH "${API}/${HOOK_ID}" \
-                     -d '{"config":{"url":"'"$HOOK_TARGET"'","content_type":"json"}}')
-            fi
-
-            if [ "$HTTP" -lt 200 ] || [ "$HTTP" -ge 300 ]; then
-              echo "GitHub API error while creating/updating hook (HTTP $HTTP):"
-              cat resp.json || true
-              exit 1
-            fi
-
-            echo "Webhook upsert OK."
-          '''
-        }
       }
     }
   }
 }
+
 
