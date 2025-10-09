@@ -1,10 +1,25 @@
----
-- hosts: local
+- name: Deploy SPE Calculator container (local)
+  hosts: local
   gather_facts: false
+  vars:
+    image: "{{ image }}"
+    container_name: "{{ container_name | default('spe-calc') }}"
+    app_port: "{{ app_port | default(5000) }}"   # use app_port, not 'port'
+
   tasks:
+    - name: Ensure Python libs for Docker are present on control host
+      ansible.builtin.pip:
+        name:
+          - requests
+          - docker
+        executable: /opt/homebrew/bin/pip3
+
     - name: Run container
       community.docker.docker_container:
-        name: spe-calc
-        image: suneeth4518/spe-calculator:latest
+        name: "{{ container_name }}"
+        image: "{{ image }}"
         state: started
-        ports: ['5000:5000']
+        recreate: true
+        pull: true
+        ports:
+          - "{{ app_port }}:5000"

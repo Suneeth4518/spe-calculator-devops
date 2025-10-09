@@ -66,7 +66,7 @@ pipeline {
           fi
 
           ${ANSIBLE} -i deploy/hosts.ini deploy/deploy.yml \
-            --extra-vars "image=${IMAGE_NAME}:latest container_name=spe-calc port=5000"
+  --extra-vars "image=${IMAGE_NAME}:latest container_name=spe-calc app_port=5000"
         '''
       }
     }
