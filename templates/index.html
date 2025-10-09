@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Scientific Calculator (SPE)</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 2rem; }
+      .card { max-width: 500px; padding: 1rem; border: 1px solid #ccc; border-radius: 10px; }
+      label, select, input { display:block; margin-top: .5rem; width: 100%; padding: .4rem; }
+      button { margin-top: 1rem; padding: .5rem 1rem; }
+      .result { margin-top: 1rem; font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Scientific Calculator</h2>
+      <p>Operations: √x, !x, ln(x), x<sup>b</sup></p>
+      <label>Operation</label>
+      <select id="op" onchange="toggleB()">
+        <option value="sqrt">Square Root</option>
+        <option value="fact">Factorial</option>
+        <option value="ln">Natural Log</option>
+        <option value="pow">Power</option>
+      </select>
+      <label>x:</label><input id="x" type="number" step="any">
+      <div id="b-wrap" style="display:none">
+        <label>b:</label><input id="b" type="number" step="any">
+      </div>
+      <button onclick="calc()">Calculate</button>
+      <div id="out" class="result"></div>
+    </div>
+
+    <script>
+      function toggleB() {
+        const op = document.getElementById('op').value;
+        document.getElementById('b-wrap').style.display = (op === 'pow') ? 'block' : 'none';
+      }
+      async function calc() {
+        const op = document.getElementById('op').value;
+        const x = document.getElementById('x').value;
+        const b = document.getElementById('b').value;
+        if (!x) { document.getElementById('out').textContent = "Please enter a value for x"; return; }
+        let url = `/api/${op}?x=${x}`;
+        if (op === 'pow') url += `&b=${b}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        document.getElementById('out').textContent = res.ok ? `Result: ${data.result}` : `Error: ${data.error}`;
+      }
+    </script>
+  </body>
+</html>
+

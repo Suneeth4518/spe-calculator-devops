@@ -1,0 +1,10 @@
+---
+- hosts: local
+  gather_facts: false
+  tasks:
+    - name: Run container
+      community.docker.docker_container:
+        name: spe-calc
+        image: suneeth4518/spe-calculator:latest
+        state: started
+        ports: ['5000:5000']
