@@ -5,4 +5,4 @@ def test_all():
     assert factorial(4)==24
     assert power(2,3)==8
     assert pytest.approx(ln(2.71828),rel=1e-3)==1
-#checking3
+#checking4
